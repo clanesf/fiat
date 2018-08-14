@@ -16,7 +16,6 @@
 
 package com.netflix.spinnaker.fiat.providers.internal;
 
-import com.netflix.hystrix.exception.HystrixBadRequestException;
 import com.netflix.spinnaker.fiat.model.resources.Account;
 import com.netflix.spinnaker.fiat.model.resources.Application;
 import com.netflix.spinnaker.fiat.providers.HealthTrackable;
@@ -25,6 +24,7 @@ import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.InitializingBean;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.scheduling.annotation.Scheduled;
 
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
@@ -36,9 +36,6 @@ import java.util.concurrent.atomic.AtomicReference;
  */
 @Slf4j
 public class ClouddriverService implements HealthTrackable, InitializingBean {
-
-  private static final String GROUP_KEY = "clouddriverService";
-
   private final ClouddriverApi clouddriverApi;
 
   @Autowired
@@ -53,56 +50,36 @@ public class ClouddriverService implements HealthTrackable, InitializingBean {
   }
 
   @Override
-  public void afterPropertiesSet() throws Exception {
+  public void afterPropertiesSet() {
     try {
-      getAccounts();
-      getApplications();
+      refreshAccounts();
+      refreshApplications();
     } catch (Exception e) {
       log.warn("Cache initialization failed: ", e);
     }
   }
 
   public List<Account> getAccounts() {
-    return new SimpleJava8HystrixCommand<>(
-        GROUP_KEY,
-        "getAccounts",
-        () -> {
-          accountCache.set(clouddriverApi.getAccounts());
-          healthTracker.success();
-          return accountCache.get();
-        },
-        (Throwable cause) -> {
-          logFallback("account", cause);
-          List<Account> accounts = accountCache.get();
-          if (accounts == null) {
-            throw new HystrixBadRequestException("Clouddriver is unavailable", cause);
-          }
-          return accounts;
-        }).execute();
+    return accountCache.get();
   }
 
   public List<Application> getApplications() {
-    return new SimpleJava8HystrixCommand<>(
-        GROUP_KEY,
-        "getApplications",
-        () -> {
-          applicationCache.set(clouddriverApi.getApplications());
-          healthTracker.success();
-          return applicationCache.get();
-        },
-        (Throwable cause) -> {
-          logFallback("application", cause);
-          List<Application> applications = applicationCache.get();
-          if (applications == null) {
-            throw new HystrixBadRequestException("Clouddriver is unavailable", cause);
-          }
-          return applications;
-        })
-        .execute();
+    return applicationCache.get();
   }
 
-  private static void logFallback(String resource, Throwable cause) {
-    String message = cause != null ? "Cause: " + cause.getMessage() : "";
-    log.info("Falling back to {} cache. {}", resource, message);
+  @Scheduled(fixedDelayString = "${fiat.clouddriverRefreshMs:30000}")
+  public void refreshAccounts() {
+    accountCache.set(
+        clouddriverApi.getAccounts()
+    );
+    healthTracker.success();
+  }
+
+  @Scheduled(fixedDelayString = "${fiat.clouddriverRefreshMs:30000}")
+  public void refreshApplications() {
+    applicationCache.set(
+        clouddriverApi.getApplications()
+    );
+    healthTracker.success();
   }
 }

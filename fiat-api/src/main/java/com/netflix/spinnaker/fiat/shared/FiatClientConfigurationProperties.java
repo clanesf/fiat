@@ -19,7 +19,6 @@ package com.netflix.spinnaker.fiat.shared;
 import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.NestedConfigurationProperty;
-import org.springframework.stereotype.Component;
 
 @Data
 @ConfigurationProperties("services.fiat")
@@ -29,13 +28,25 @@ public class FiatClientConfigurationProperties {
 
   private String baseUrl;
 
+  private boolean legacyFallback = false;
+
   @NestedConfigurationProperty
   private PermissionsCache cache = new PermissionsCache();
+
+  @NestedConfigurationProperty
+  private RetryConfiguration retry = new RetryConfiguration();
 
   @Data
   class PermissionsCache {
     private Integer maxEntries = 1000;
 
     private Integer expiresAfterWriteSeconds = 20;
+  }
+
+  @Data
+  class RetryConfiguration {
+    private long maxBackoffMillis = 10000;
+    private long initialBackoffMillis = 500;
+    private double retryMultiplier = 1.5;
   }
 }

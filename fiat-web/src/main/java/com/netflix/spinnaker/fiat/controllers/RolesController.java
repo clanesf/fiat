@@ -61,9 +61,14 @@ public class RolesController {
   @RequestMapping(value = "/{userId:.+}", method = RequestMethod.POST)
   public void putUserPermission(@PathVariable String userId) {
     try {
-      permissionsRepository.put(
-          permissionsResolver.resolve(ControllerSupport.convert(userId))
+      UserPermission userPermission = permissionsResolver.resolve(ControllerSupport.convert(userId));
+      log.debug(
+          "Updated user permissions (userId: {}, roles: {})",
+          userId,
+          userPermission.getRoles().stream().map(Role::getName).collect(Collectors.toList())
       );
+
+      permissionsRepository.put(userPermission);
     } catch (PermissionResolutionException pre) {
       throw new UserPermissionModificationException(pre);
     }
@@ -81,9 +86,15 @@ public class RolesController {
                                              .setExternalRoles(convertedRoles);
 
     try {
-      permissionsRepository.put(
-          permissionsResolver.resolveAndMerge(extUser)
+      UserPermission userPermission = permissionsResolver.resolveAndMerge(extUser);
+      log.debug(
+          "Updated user permissions (userId: {}, roles: {}, suppliedExternalRoles: {})",
+          userId,
+          userPermission.getRoles().stream().map(Role::getName).collect(Collectors.toList()),
+          externalRoles
       );
+
+      permissionsRepository.put(userPermission);
     } catch (PermissionResolutionException pre) {
       throw new UserPermissionModificationException(pre);
     }
@@ -97,7 +108,7 @@ public class RolesController {
   @RequestMapping(value = "/sync", method = RequestMethod.POST)
   public long sync(HttpServletResponse response,
                    @RequestBody(required = false) List<String> specificRoles) throws IOException {
-    if (specificRoles == null) {
+    if (specificRoles == null || specificRoles.isEmpty()) {
       log.info("Full role sync invoked by web request.");
       long count = syncer.syncAndReturn();
       if (count == 0) {

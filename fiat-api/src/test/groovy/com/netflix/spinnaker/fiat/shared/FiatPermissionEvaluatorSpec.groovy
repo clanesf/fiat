@@ -25,38 +25,39 @@ import com.netflix.spinnaker.fiat.model.resources.Permissions
 import com.netflix.spinnaker.fiat.model.resources.ResourceType
 import com.netflix.spinnaker.fiat.model.resources.Role
 import com.netflix.spinnaker.fiat.model.resources.ServiceAccount
-import com.netflix.spinnaker.kork.dynamicconfig.DynamicConfigService
-import org.springframework.security.core.Authentication
+import com.netflix.spinnaker.security.AuthenticatedRequest
+import org.slf4j.MDC
 import org.springframework.security.web.authentication.preauth.PreAuthenticatedAuthenticationToken
+import spock.lang.Shared
 import spock.lang.Specification
 import spock.lang.Subject
 import spock.lang.Unroll
 
 class FiatPermissionEvaluatorSpec extends Specification {
-  DynamicConfigService dynamicConfigService = Mock(DynamicConfigService) {
-    _ * isEnabled('fiat', true) >> { return true }
-  }
   FiatService fiatService = Mock(FiatService)
   Registry registry = new NoopRegistry()
   FiatStatus fiatStatus = Mock(FiatStatus) {
     _ * isEnabled() >> { return true }
   }
 
+  @Shared
+  def authentication = new PreAuthenticatedAuthenticationToken("testUser", null, [])
+
   @Subject
   FiatPermissionEvaluator evaluator = new FiatPermissionEvaluator(
       registry,
       fiatService,
       buildConfigurationProperties(),
-      fiatStatus
+      fiatStatus,
+      FiatPermissionEvaluator.RetryHandler.NOOP
   )
+
+  def cleanup() {
+    MDC.clear()
+  }
 
   @Unroll
   def "should parse application name"() {
-    setup:
-    Authentication authentication = new PreAuthenticatedAuthenticationToken("testUser",
-                                                                            null,
-                                                                            new ArrayList<>())
-
     when:
     def result = evaluator.hasPermission(authentication,
                                          resource,
@@ -94,9 +95,6 @@ class FiatPermissionEvaluatorSpec extends Specification {
 
   def "should grant or deny permission"() {
     setup:
-    Authentication authentication = new PreAuthenticatedAuthenticationToken("testUser",
-                                                                            null,
-                                                                            new ArrayList<>())
     String resource = "readable"
     String svcAcct = "svcAcct"
 
@@ -145,6 +143,112 @@ class FiatPermissionEvaluatorSpec extends Specification {
     then:
     1 * fiatService.getUserPermission("testUser") >> upv
     hasPermission
+  }
+
+  @Unroll
+  def "should retry fiat requests"() {
+    given:
+    FiatPermissionEvaluator evaluator = new FiatPermissionEvaluator(
+            registry,
+            fiatService,
+            buildConfigurationProperties(),
+            fiatStatus,
+            new FiatPermissionEvaluator.ExponentialBackoffRetryHandler(10, 15, 1)
+    )
+
+    when:
+    def view = evaluator.getPermission("testUser")
+
+    then:
+    2 * fiatService.getUserPermission("testUser") >> { throw new IllegalStateException("something something something")}
+
+    view == null
+  }
+
+  @Unroll
+  def "should support legacy fallback when fiat is unavailable"() {
+    given:
+    MDC.put(AuthenticatedRequest.SPINNAKER_USER, "fallback")
+    MDC.put(AuthenticatedRequest.SPINNAKER_ACCOUNTS, "account1,account2")
+
+    when:
+    def permission = evaluator.getPermission("testUser")
+    def hasPermission = evaluator.hasPermission(authentication, "my_application", "APPLICATION", "READ")
+
+    then:
+    2 * fiatStatus.isLegacyFallbackEnabled() >> { return legacyFallbackEnabled }
+    2 * fiatService.getUserPermission("testUser") >> { throw new IllegalStateException("something something something")}
+
+    hasPermission == expectedToHavePermission
+    permission?.name == expectedName
+    permission?.accounts*.name?.sort() == expectedAccounts?.sort()
+
+    where:
+    legacyFallbackEnabled || expectedToHavePermission || expectedName || expectedAccounts
+    true                  || true                     || "fallback"   || ["account1", "account2"]
+    false                 || false                    || null         || null
+  }
+
+  @Unroll
+  def "should deny access to an application that has an empty set of authorizations"() {
+    when:
+    def hasReadPermission = evaluator.hasPermission(authentication, "my_application", "APPLICATION", "READ")
+    def hasWritePermission = evaluator.hasPermission(authentication, "my_application", "APPLICATION", "WRITE")
+
+    then:
+    2 * fiatService.getUserPermission("testUser") >> {
+      return new UserPermission.View()
+          .setApplications(
+          [
+              new Application.View()
+                  .setName("my_application")
+                  .setAuthorizations(authorizations as Set<Authorization>)
+          ] as Set<Application.View>
+      )
+    }
+
+    !hasReadPermission
+    !hasWritePermission
+
+    where:
+    authorizations << [null, [] as Set]
+  }
+
+  @Unroll
+  def "should allow access to unknown applications"() {
+    when:
+    def hasPermission = evaluator.hasPermission(authentication, "my_application", "APPLICATION", "READ")
+
+    then:
+    1 * fiatService.getUserPermission("testUser") >> {
+      return new UserPermission.View()
+          .setAllowAccessToUnknownApplications(allowAccessToUnknownApplications)
+          .setApplications(Collections.emptySet())
+    }
+
+    hasPermission == expectedToHavePermission
+
+    where:
+    allowAccessToUnknownApplications || expectedToHavePermission
+    false                            || false
+    true                             || true
+  }
+
+  @Unroll
+  def "should allow an admin to access all resource types"() {
+    given:
+    2 * fiatService.getUserPermission("testUser") >> {
+      return new UserPermission.View()
+          .setApplications(Collections.emptySet())
+          .setAdmin(true)
+    }
+
+    expect:
+    evaluator.hasPermission(authentication, "my_resource", resourceType, "READ")
+    evaluator.hasPermission(authentication, "my_resource", resourceType, "WRITE")
+
+    where:
+    resourceType << ResourceType.values()*.toString()
   }
 
   private static FiatClientConfigurationProperties buildConfigurationProperties() {
